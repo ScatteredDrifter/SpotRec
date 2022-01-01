@@ -50,9 +50,10 @@ _add_cover_art = False
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
 _pa_max_volume = "65536"
-_recording_time_before_song = 0.25
-_recording_time_after_song = 1.25
+_recording_time_before_song = 1.5
+_recording_time_after_song = 2.5
 _playback_time_before_seeking_to_beginning = 5.0
+_ffmpeg_terminate_wait_time = 5.0
 _shell_executable = "/bin/bash"  # Default: "/bin/sh"
 _shell_encoding = "utf-8"
 _ffmpeg_executable = "ffmpeg"  # Example: "/usr/bin/ffmpeg"
@@ -266,7 +267,6 @@ class Spotify:
         return {
             "artist": self.metadata_artist,
             "album": self.metadata_album,
-            "track": self.metadata_trackNumber.lstrip("0"),
             "title": self.metadata_title,
             "cover_url": self.metadata_artUrl,
         }
@@ -312,6 +312,14 @@ class Spotify:
                 # Use copy() to not change the list during this method runs
                 self.parent.stop_old_recording(FFmpeg.instances.copy())
 
+                # at this point the song should be paused, so play it
+                self.parent.send_dbus_cmd("Play")
+
+                # Do not record ads
+                if self.parent.trackid.startswith("spotify:ad:"):
+                    log.debug(f"[{app_name}] Skipping ad")
+                    return
+
                 # This is currently the only way to seek to the beginning (let it Play for some seconds, Pause and send Previous)
                 time.sleep(_playback_time_before_seeking_to_beginning)
 
@@ -328,11 +336,6 @@ class Spotify:
                     if not is_script_paused:
                         doExit()
 
-                    return
-
-                # Do not record ads
-                if self.parent.trackid.startswith("spotify:ad:"):
-                    log.debug(f"[{app_name}] Skipping ad")
                     return
 
                 log.info(f"[{app_name}] Starting recording")
@@ -370,16 +373,9 @@ class Spotify:
     def stop_old_recording(self, instances):
         # Stop the oldest FFmpeg instance (from recording of song before) (if one is running)
         if len(instances) > 0:
-            class OverheadRecordingStopThread(Thread):
-                def run(self):
-                    # Record a little longer to not miss something
-                    time.sleep(_recording_time_after_song)
-
-                    # Stop the recording
-                    instances[0].stop_blocking()
-
-            overhead_recording_stop_thread = OverheadRecordingStopThread()
-            overhead_recording_stop_thread.start()
+            time.sleep(_recording_time_after_song)
+            # Stop the recording
+            instances[0].stop_blocking()
 
     # This gets called whenever Spotify sends the playingUriChanged signal
     def on_playing_uri_changed(self, Player, three, four):
@@ -410,7 +406,7 @@ class Spotify:
 
     def playing_song_changed(self):
         log.info("[Spotify] Song changed: " + self.track)
-
+        self.send_dbus_cmd("Pause")
         self.start_record()
 
     def playbackstatus_changed(self):
@@ -460,13 +456,9 @@ class FFmpeg:
 
         self.pulse_input = _pa_recording_sink_name + ".monitor"
 
-        if _tmp_file:
-            # Use a dot as filename prefix to hide the file until the recording was successful
-            self.tmp_file_prefix = "."
-            self.filename = self.tmp_file_prefix + \
-                os.path.basename(file) + "." + _audio_codec
-        else:
-            self.filename = os.path.basename(file) + "." +_audio_codec
+        self.tmp_file_prefix = "."
+        self.filename = self.tmp_file_prefix + \
+            os.path.basename(file) + "." +_audio_codec
 
         # save this to self because metadata_params is discarded after this function
         self.cover_url = metadata_for_file.pop('cover_url')
@@ -486,7 +478,7 @@ class FFmpeg:
                                    '-f pulse ' +
                                    '-ac 2 -ar 44100 -fragment_size 8820 ' +
                                    '-i ' + self.pulse_input + metadata_params + ' '
-                                   ' -acodec ' + _audio_codec + 
+                                   ' -acodec ' + _audio_codec +
                                    ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
         self.pid = str(self.process.pid)
@@ -502,19 +494,19 @@ class FFmpeg:
             self.instances.remove(self)
 
             # Send CTRL_C
+            start_time = time.time()
             self.process.terminate()
 
             log.info(f"[FFmpeg] [{self.pid}] terminated")
 
-            # Sometimes this is not enough and ffmpeg survives, so we have to kill it after some time
-            time.sleep(1)
+            # Wait upto _ffmpeg_terminate_wait_time seconds for terminate to work
+            while self.process.poll() == None and (time.time() - start_time <= _ffmpeg_terminate_wait_time):
+                time.sleep(1)
 
+            # Otherwise kill it
             if self.process.poll() == None:
-                # None means it has no return code (yet), with other words: it is still running
-
                 self.process.kill()
-
-                log.info(f"[FFmpeg] [{self.pid}] killed")
+                log.info(f"[FFmpeg] [{self.pid}] killed, song did not finish recording successfully!")
             else:
                 global is_shutting_down
                 if not is_shutting_down:  # Do not post-process unfinished recordings
@@ -524,7 +516,7 @@ class FFmpeg:
                                             self.filename[len(self.tmp_file_prefix):])
                     if os.path.exists(tmp_file):
                         shutil.move(tmp_file, new_file)
-                        log.debug(
+                        log.info(
                             f"[FFmpeg] [{self.pid}] Successfully renamed {self.filename}")
                         global _add_cover_art
                         if _add_cover_art:
@@ -564,15 +556,16 @@ class FFmpeg:
     # add cover art to temp _withArtwork file
     # and then move it to replace the original file
     def add_cover_art(self, fullfilepath):
+        global _audio_codec
         if self.cover_url is None:
             log.debug(f'[FFmpeg] No cover art found for {fullfilepath}')
             return
         # save the image locally -> could use a temp file here
         #   but might add option to keep image later
         cover_file = fullfilepath.rsplit(
-            '.flac', 1)[0]  # remove the extension
+            '.{}'.format(_audio_codec), 1)[0]  # remove the extension
         log.debug(f'Saving cover art to {cover_file} + image_ext')
-        temp_file = cover_file + '_withArtwork.' + 'flac'
+        temp_file = cover_file + '_withArtwork.' + _audio_codec
         if self.cover_url.startswith('file://'):
             log.debug(f'[FFmpeg] Cover art is local for {fullfilepath}')
             path = self.cover_url[len('file://'):]
@@ -607,7 +600,9 @@ class FFmpeg:
         log.debug(
             f'[FFmpeg] Added cover art for {fullfilepath} in temp file, moving it')
         shutil.move(temp_file, fullfilepath)
-        os.remove(cover_file)   # now delete the cover art
+        #os.remove(cover_file)   # now delete the cover art
+        log.info(
+            f'[FFmpeg] Added artwork for {fullfilepath}')
 
     @staticmethod
     def killAll():
