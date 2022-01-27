@@ -46,6 +46,7 @@ def run_pooled(func, args):
     return results, failureList
 
 def trimSilence(mp3):
+    print("Trimming silence on", mp3)
     encoding = "utf-8"
     trimmedMp3 = getTrimmedMp3(mp3)
     cmd = "sox {} {} silence " \
@@ -65,9 +66,12 @@ def trimSilence(mp3):
     return trimmedMp3
 
 def copyOverArtwork(mp3):
+    print("Copying artwork from", mp3)
     trimmedMp3 = getTrimmedMp3(mp3)
     original = eyed3.load(mp3)
     trimmed  = eyed3.load(trimmedMp3)
+    if len(original.tag._images) == 0:
+        return
     original_dict = original.tag._images[0].__dict__.copy()
     trimmed.tag.images.set(type_ = original_dict['_pic_type'],
                             img_data = original_dict['image_data'],
@@ -75,15 +79,15 @@ def copyOverArtwork(mp3):
     trimmed.tag.save()
 
 def cleanUp(mp3):
+    print("Cleaning up", mp3)
     trimmedMp3 = getTrimmedMp3(mp3)
     if os.path.exists(trimmedMp3):
         shutil.move(trimmedMp3, mp3)
     trimmedLocation, _ = os.path.split(trimmedMp3)
-    if len(os.listdir(trimmedLocation)) == 0:
-        try:
-            os.rmdir(trimmedLocation)
-        except OSError:
-            pass
+    try:
+        os.rmdir(trimmedLocation)
+    except OSError:
+        pass
 
 def createArtworkFiles(mp3):
     fileLocation, fileName = os.path.split(mp3)
