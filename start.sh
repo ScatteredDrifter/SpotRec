@@ -1,2 +1,2 @@
 #!/bin/sh
-./spotrec.py -o ./spotify --skip-intro -m -a -ac mp3 --filename-pattern "{artist}/{album}/{artist} - {title}"
+./spotrec.py -o ~/SpotRecTesting --skip-intro -u -a -ac flac -db recording.db --filename-pattern "{artist}/{album}:{title}"

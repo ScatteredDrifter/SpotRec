@@ -2,12 +2,12 @@
 
 # License: https://raw.githubusercontent.com/Bleuzen/SpotRec/master/LICENSE
 
+# |--- External Imports
 import dbus
 from dbus.exceptions import DBusException
 import dbus.mainloop.glib
 from gi.repository import GLib
 from pathlib import Path
-
 from threading import Thread
 import subprocess
 import time
@@ -20,7 +20,12 @@ import traceback
 import logging
 import shlex
 import requests
+import sqlite3
 
+# |---- Internal Imports
+from song_postprocess_after_picard import open_and_shorten_song
+from mod_db_interface import song_is_in_db,insert_new_song,initialize_database,SOURCES
+from mod_data_representation import song_metadata
 # Deps:
 # 'python'
 # 'python-dbus'
@@ -41,11 +46,13 @@ _debug_logging = False
 _skip_intro = False
 _mute_pa_recording_sink = False
 _output_directory = f"{Path.home()}/{app_name}"
-_filename_pattern = "{trackNumber} - {artist} - {title}"
+_filename_pattern = "{artist}/{album}:{title}"
 _underscored_filenames = False
 _use_internal_track_counter = False
 _audio_codec = "flac"
 _add_cover_art = False
+_download_source = "Spotify"
+_recording_db:str = "songs.db"
 
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
@@ -83,6 +90,7 @@ def main():
         print()
 
     init_log()
+    _connection_db = initialize_database(_recording_db)
 
     # Create the output directory
     Path(_output_directory).mkdir(
@@ -125,6 +133,9 @@ def doExit():
 
 
 def handle_command_line():
+    '''
+    method to establish, initialize parameters given via argument parser. 
+    '''
     global _debug_logging
     global _skip_intro
     global _mute_pa_recording_sink
@@ -134,6 +145,8 @@ def handle_command_line():
     global _use_internal_track_counter
     global _audio_codec
     global _add_cover_art
+    global _download_source
+    global _recording_db
 
     parser = argparse.ArgumentParser(
         description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
@@ -159,26 +172,22 @@ def handle_command_line():
                         action="store_true", default=_use_internal_track_counter)
     parser.add_argument("-a", "--add-cover-art", help="Embed the cover art from Spotify into the file",
                         action="store_true", default=_add_cover_art)
+    
+    parser.add_argument("-src", "--download-source", help="Metadata: Where Song was downloaded from\n{}".format(SOURCES), default=_download_source)
+    parser.add_argument("-db", "--database", help="Path To Database that contains information on downloaded songs.",required=True, default=_recording_db)
 
     args = parser.parse_args()
-
-    _debug_logging = args.debug
-
-    _skip_intro = args.skip_intro
-
-    _mute_pa_recording_sink = args.mute_recording
-
-    _filename_pattern = args.filename_pattern
-
-    _output_directory = args.output_directory
-
-    _underscored_filenames = args.underscored_filenames
-
+    _debug_logging              = args.debug
+    _skip_intro                 = args.skip_intro
+    _mute_pa_recording_sink     = args.mute_recording
+    _filename_pattern           = args.filename_pattern
+    _output_directory           = args.output_directory
+    _underscored_filenames      = args.underscored_filenames
     _use_internal_track_counter = args.internal_track_counter
-
-    _audio_codec = args.audio_codec
-
-    _add_cover_art = args.add_cover_art
+    _audio_codec                = args.audio_codec
+    _add_cover_art              = args.add_cover_art
+    _download_source            = args.download_source
+    _recording_db               = args.database
 
 
 def init_log():
@@ -204,9 +213,9 @@ class Spotify:
 
     def __init__(self):
         self.glibloop = None
+        print("Initialization of Spotify Class")
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
         try:
             # Connect to Spotify client dbus interface
             bus = dbus.SessionBus()
@@ -245,6 +254,7 @@ class Spotify:
                 log.info(f"[{app_name}] GLib Loop thread killed")
 
         dbuslistener = DBusListenerThread(self)
+        # executing run() of the given trhead --> initializing Dbustlistener in new thread!
         dbuslistener.start()
 
         log.info(f"[{app_name}] Spotify DBus listener started")
@@ -407,7 +417,24 @@ class Spotify:
     def playing_song_changed(self):
         log.info("[Spotify] Song changed: " + self.track)
         self.send_dbus_cmd("Pause")
-        self.start_record()
+        song_info = song_metadata(
+            artist=self.metadata_artist,
+            title=self.metadata_title,
+            track_id=None,
+            album=self.metadata_album,
+            song_length_in_ms=None,
+            source=_download_source
+        )
+        print(f"[DEBUG] Found Song Infos From Song:\n{song_info}")
+        db_connection = initialize_database(_recording_db)
+        if song_is_in_db(db_connection,song_info):
+            log.info("[Song Change Spotify] Song already recorded, found in db")
+            log.info("[Song Change Spotify] Skipping adding entry")
+            self.send_dbus_cmd("Play")
+        else: 
+            insert_new_song(db_connection,song_info)
+            # self.send_dbus_cmd("Pause")
+            self.start_record()
 
     def playbackstatus_changed(self):
         log.info("[Spotify] State changed: " + self.playbackstatus)
@@ -518,6 +545,9 @@ class FFmpeg:
                         shutil.move(tmp_file, new_file)
                         log.info(
                             f"[FFmpeg] [{self.pid}] Successfully renamed {self.filename}")
+                        # post processing file!
+                        thread_post_process = PostProcessThread(new_file)
+                        thread_post_process.start()
                         global _add_cover_art
                         if _add_cover_art:
                             class AddCoverArtThread(Thread):
@@ -614,6 +644,18 @@ class FFmpeg:
 
         log.info("[FFmpeg] All instances killed")
 
+class PostProcessThread(Thread):
+    def __init__(self, file_path:str):
+        Thread.__init__(self)
+        self.file_path = file_path
+
+    def run(self):
+        # Call your post-processing function here
+        # For example: open_and_shorten_song(self.file_path)
+        print(f"| -- [Post Processsing] --")
+        open_and_shorten_song(self.file_path)
+
+        pass
 
 class Shell:
     @staticmethod
