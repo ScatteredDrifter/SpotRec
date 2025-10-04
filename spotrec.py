@@ -385,7 +385,19 @@ class Spotify:
         if len(instances) > 0:
             time.sleep(_recording_time_after_song)
             # Stop the recording
+            song_infos = song_metadata(
+                self.metadata_artist,
+                self.metadata_title,
+                None,
+                self.metadata_album,
+                None,
+                _download_source
+            )
             instances[0].stop_blocking()
+            #FIXME maybe collect data of running song here? 
+            connection = initialize_database(_recording_db)
+            insert_new_song(connection,song_infos)
+            # -> Adding to the database here give the benefit, that songs will only get added once their recording has been finished entirely
 
     # This gets called whenever Spotify sends the playingUriChanged signal
     def on_playing_uri_changed(self, Player, three, four):
@@ -430,10 +442,11 @@ class Spotify:
         if song_is_in_db(db_connection,song_info):
             log.info("[Song Change Spotify] Song already recorded, found in db")
             log.info("[Song Change Spotify] Skipping adding entry")
-            self.send_dbus_cmd("Play")
+            self.stop_old_recording(FFmpeg.instances.copy())
+            self.send_dbus_cmd("Next")
         else: 
-            insert_new_song(db_connection,song_info)
             # self.send_dbus_cmd("Pause")
+            # Only adding Song to Db, after it's been recorded entirely!
             self.start_record()
 
     def playbackstatus_changed(self):
@@ -477,6 +490,7 @@ class Spotify:
 
 class FFmpeg:
     instances = []
+
 
     def record(self, out_dir: str, file: str, metadata_for_file={}):
         self.out_dir = out_dir
@@ -548,6 +562,9 @@ class FFmpeg:
                         # post processing file!
                         thread_post_process = PostProcessThread(new_file)
                         thread_post_process.start()
+                        # adding song to database
+                        # connection = initialize_database(_recording_db)
+                        # insert_new_song(connection,metadata)
                         global _add_cover_art
                         if _add_cover_art:
                             class AddCoverArtThread(Thread):
