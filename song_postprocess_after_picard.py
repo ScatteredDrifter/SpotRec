@@ -17,7 +17,7 @@ import musicbrainzngs
 from mod_data_representation import song_metadata
 
 # variables
-user_mail:str = "social.scattereddrifter@proton.me"
+user_mail:str = "yourmail"
 
 unchecked_file_prefix:str="[UNCHECKED]_"
 
