@@ -2,12 +2,12 @@
 
 # License: https://raw.githubusercontent.com/Bleuzen/SpotRec/master/LICENSE
 
+# |--- External Imports
 import dbus
 from dbus.exceptions import DBusException
 import dbus.mainloop.glib
 from gi.repository import GLib
 from pathlib import Path
-
 from threading import Thread
 import subprocess
 import time
@@ -20,7 +20,12 @@ import traceback
 import logging
 import shlex
 import requests
+import sqlite3
 
+# |---- Internal Imports
+from song_postprocess_after_picard import open_and_shorten_song
+from mod_db_interface import song_is_in_db,insert_new_song,initialize_database,SOURCES
+from mod_data_representation import song_metadata
 # Deps:
 # 'python'
 # 'python-dbus'
@@ -41,17 +46,21 @@ _debug_logging = False
 _skip_intro = False
 _mute_pa_recording_sink = False
 _output_directory = f"{Path.home()}/{app_name}"
-_filename_pattern = "{trackNumber} - {artist} - {title}"
+_filename_pattern = "{artist}/{album}:{title}"
 _underscored_filenames = False
 _use_internal_track_counter = False
+_audio_codec = "flac"
 _add_cover_art = False
+_download_source = "Spotify"
+_recording_db:str = "songs.db"
 
 # Hard-coded settings
 _pa_recording_sink_name = "spotrec"
 _pa_max_volume = "65536"
-_recording_time_before_song = 0.25
-_recording_time_after_song = 1.25
+_recording_time_before_song = 1.5
+_recording_time_after_song = 2.5
 _playback_time_before_seeking_to_beginning = 5.0
+_ffmpeg_terminate_wait_time = 5.0
 _shell_executable = "/bin/bash"  # Default: "/bin/sh"
 _shell_encoding = "utf-8"
 _ffmpeg_executable = "ffmpeg"  # Example: "/usr/bin/ffmpeg"
@@ -81,6 +90,7 @@ def main():
         print()
 
     init_log()
+    _connection_db = initialize_database(_recording_db)
 
     # Create the output directory
     Path(_output_directory).mkdir(
@@ -123,6 +133,9 @@ def doExit():
 
 
 def handle_command_line():
+    '''
+    method to establish, initialize parameters given via argument parser. 
+    '''
     global _debug_logging
     global _skip_intro
     global _mute_pa_recording_sink
@@ -130,7 +143,10 @@ def handle_command_line():
     global _filename_pattern
     global _underscored_filenames
     global _use_internal_track_counter
+    global _audio_codec
     global _add_cover_art
+    global _download_source
+    global _recording_db
 
     parser = argparse.ArgumentParser(
         description=app_name + " v" + app_version, formatter_class=argparse.RawTextHelpFormatter)
@@ -142,6 +158,9 @@ def handle_command_line():
                         action="store_true", default=_mute_pa_recording_sink)
     parser.add_argument("-o", "--output-directory", help="Where to save the recordings\n"
                                                          "Default: " + _output_directory, default=_output_directory)
+    parser.add_argument("-ac", "--audio-codec", help="Set the audio codec of the recorded files\n"
+                                                     "Available: flac, mp3\n"
+                                                     "Default: flac", default=_audio_codec)
     parser.add_argument("-p", "--filename-pattern", help="A pattern for the file names of the recordings\n"
                                                          "Available: {artist}, {album}, {trackNumber}, {title}\n"
                                                          "Default: \"" + _filename_pattern + "\"\n"
@@ -153,24 +172,22 @@ def handle_command_line():
                         action="store_true", default=_use_internal_track_counter)
     parser.add_argument("-a", "--add-cover-art", help="Embed the cover art from Spotify into the file",
                         action="store_true", default=_add_cover_art)
+    
+    parser.add_argument("-src", "--download-source", help="Metadata: Where Song was downloaded from\n{}".format(SOURCES), default=_download_source)
+    parser.add_argument("-db", "--database", help="Path To Database that contains information on downloaded songs.",required=True, default=_recording_db)
 
     args = parser.parse_args()
-
-    _debug_logging = args.debug
-
-    _skip_intro = args.skip_intro
-
-    _mute_pa_recording_sink = args.mute_recording
-
-    _filename_pattern = args.filename_pattern
-
-    _output_directory = args.output_directory
-
-    _underscored_filenames = args.underscored_filenames
-
+    _debug_logging              = args.debug
+    _skip_intro                 = args.skip_intro
+    _mute_pa_recording_sink     = args.mute_recording
+    _filename_pattern           = args.filename_pattern
+    _output_directory           = args.output_directory
+    _underscored_filenames      = args.underscored_filenames
     _use_internal_track_counter = args.internal_track_counter
-
-    _add_cover_art = args.add_cover_art
+    _audio_codec                = args.audio_codec
+    _add_cover_art              = args.add_cover_art
+    _download_source            = args.download_source
+    _recording_db               = args.database
 
 
 def init_log():
@@ -196,9 +213,9 @@ class Spotify:
 
     def __init__(self):
         self.glibloop = None
+        print("Initialization of Spotify Class")
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
         try:
             # Connect to Spotify client dbus interface
             bus = dbus.SessionBus()
@@ -237,6 +254,7 @@ class Spotify:
                 log.info(f"[{app_name}] GLib Loop thread killed")
 
         dbuslistener = DBusListenerThread(self)
+        # executing run() of the given trhead --> initializing Dbustlistener in new thread!
         dbuslistener.start()
 
         log.info(f"[{app_name}] Spotify DBus listener started")
@@ -259,7 +277,6 @@ class Spotify:
         return {
             "artist": self.metadata_artist,
             "album": self.metadata_album,
-            "track": self.metadata_trackNumber.lstrip("0"),
             "title": self.metadata_title,
             "cover_url": self.metadata_artUrl,
         }
@@ -305,6 +322,14 @@ class Spotify:
                 # Use copy() to not change the list during this method runs
                 self.parent.stop_old_recording(FFmpeg.instances.copy())
 
+                # at this point the song should be paused, so play it
+                self.parent.send_dbus_cmd("Play")
+
+                # Do not record ads
+                if self.parent.trackid.startswith("spotify:ad:"):
+                    log.debug(f"[{app_name}] Skipping ad")
+                    return
+
                 # This is currently the only way to seek to the beginning (let it Play for some seconds, Pause and send Previous)
                 time.sleep(_playback_time_before_seeking_to_beginning)
 
@@ -321,11 +346,6 @@ class Spotify:
                     if not is_script_paused:
                         doExit()
 
-                    return
-
-                # Do not record ads
-                if self.parent.trackid.startswith("spotify:ad:"):
-                    log.debug(f"[{app_name}] Skipping ad")
                     return
 
                 log.info(f"[{app_name}] Starting recording")
@@ -363,16 +383,21 @@ class Spotify:
     def stop_old_recording(self, instances):
         # Stop the oldest FFmpeg instance (from recording of song before) (if one is running)
         if len(instances) > 0:
-            class OverheadRecordingStopThread(Thread):
-                def run(self):
-                    # Record a little longer to not miss something
-                    time.sleep(_recording_time_after_song)
-
-                    # Stop the recording
-                    instances[0].stop_blocking()
-
-            overhead_recording_stop_thread = OverheadRecordingStopThread()
-            overhead_recording_stop_thread.start()
+            time.sleep(_recording_time_after_song)
+            # Stop the recording
+            song_infos = song_metadata(
+                self.metadata_artist,
+                self.metadata_title,
+                None,
+                self.metadata_album,
+                None,
+                _download_source
+            )
+            instances[0].stop_blocking()
+            #FIXME maybe collect data of running song here? 
+            connection = initialize_database(_recording_db)
+            insert_new_song(connection,song_infos)
+            # -> Adding to the database here give the benefit, that songs will only get added once their recording has been finished entirely
 
     # This gets called whenever Spotify sends the playingUriChanged signal
     def on_playing_uri_changed(self, Player, three, four):
@@ -403,8 +428,26 @@ class Spotify:
 
     def playing_song_changed(self):
         log.info("[Spotify] Song changed: " + self.track)
-
-        self.start_record()
+        self.send_dbus_cmd("Pause")
+        song_info = song_metadata(
+            artist=self.metadata_artist,
+            title=self.metadata_title,
+            track_id=None,
+            album=self.metadata_album,
+            song_length_in_ms=None,
+            source=_download_source
+        )
+        print(f"[DEBUG] Found Song Infos From Song:\n{song_info}")
+        db_connection = initialize_database(_recording_db)
+        if song_is_in_db(db_connection,song_info):
+            log.info("[Song Change Spotify] Song already recorded, found in db")
+            log.info("[Song Change Spotify] Skipping adding entry")
+            self.stop_old_recording(FFmpeg.instances.copy())
+            self.send_dbus_cmd("Next")
+        else: 
+            # self.send_dbus_cmd("Pause")
+            # Only adding Song to Db, after it's been recorded entirely!
+            self.start_record()
 
     def playbackstatus_changed(self):
         log.info("[Spotify] State changed: " + self.playbackstatus)
@@ -448,15 +491,15 @@ class Spotify:
 class FFmpeg:
     instances = []
 
+
     def record(self, out_dir: str, file: str, metadata_for_file={}):
         self.out_dir = out_dir
 
         self.pulse_input = _pa_recording_sink_name + ".monitor"
 
-        # Use a dot as filename prefix to hide the file until the recording was successful
         self.tmp_file_prefix = "."
         self.filename = self.tmp_file_prefix + \
-            os.path.basename(file) + ".flac"
+            os.path.basename(file) + "." +_audio_codec
 
         # save this to self because metadata_params is discarded after this function
         self.cover_url = metadata_for_file.pop('cover_url')
@@ -471,12 +514,12 @@ class FFmpeg:
         #  "-ac 2": always use 2 audio channels (stereo) (same as Spotify)
         #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
         #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
-        #  "-acodec flac": use the flac lossless audio codec, so we don't lose quality while recording
+        #  "-acodec": use flac or mp3 audio codec, specified as command line argument
         self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
                                    '-f pulse ' +
                                    '-ac 2 -ar 44100 -fragment_size 8820 ' +
                                    '-i ' + self.pulse_input + metadata_params + ' '
-                                   '-acodec flac' +
+                                   ' -acodec ' + _audio_codec +
                                    ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
         self.pid = str(self.process.pid)
@@ -492,19 +535,19 @@ class FFmpeg:
             self.instances.remove(self)
 
             # Send CTRL_C
+            start_time = time.time()
             self.process.terminate()
 
             log.info(f"[FFmpeg] [{self.pid}] terminated")
 
-            # Sometimes this is not enough and ffmpeg survives, so we have to kill it after some time
-            time.sleep(1)
+            # Wait upto _ffmpeg_terminate_wait_time seconds for terminate to work
+            while self.process.poll() == None and (time.time() - start_time <= _ffmpeg_terminate_wait_time):
+                time.sleep(1)
 
+            # Otherwise kill it
             if self.process.poll() == None:
-                # None means it has no return code (yet), with other words: it is still running
-
                 self.process.kill()
-
-                log.info(f"[FFmpeg] [{self.pid}] killed")
+                log.info(f"[FFmpeg] [{self.pid}] killed, song did not finish recording successfully!")
             else:
                 global is_shutting_down
                 if not is_shutting_down:  # Do not post-process unfinished recordings
@@ -514,8 +557,14 @@ class FFmpeg:
                                             self.filename[len(self.tmp_file_prefix):])
                     if os.path.exists(tmp_file):
                         shutil.move(tmp_file, new_file)
-                        log.debug(
+                        log.info(
                             f"[FFmpeg] [{self.pid}] Successfully renamed {self.filename}")
+                        # post processing file!
+                        thread_post_process = PostProcessThread(new_file)
+                        thread_post_process.start()
+                        # adding song to database
+                        # connection = initialize_database(_recording_db)
+                        # insert_new_song(connection,metadata)
                         global _add_cover_art
                         if _add_cover_art:
                             class AddCoverArtThread(Thread):
@@ -554,15 +603,16 @@ class FFmpeg:
     # add cover art to temp _withArtwork file
     # and then move it to replace the original file
     def add_cover_art(self, fullfilepath):
+        global _audio_codec
         if self.cover_url is None:
             log.debug(f'[FFmpeg] No cover art found for {fullfilepath}')
             return
         # save the image locally -> could use a temp file here
         #   but might add option to keep image later
         cover_file = fullfilepath.rsplit(
-            '.flac', 1)[0]  # remove the extension
+            '.{}'.format(_audio_codec), 1)[0]  # remove the extension
         log.debug(f'Saving cover art to {cover_file} + image_ext')
-        temp_file = cover_file + '_withArtwork.' + 'flac'
+        temp_file = cover_file + '_withArtwork.' + _audio_codec
         if self.cover_url.startswith('file://'):
             log.debug(f'[FFmpeg] Cover art is local for {fullfilepath}')
             path = self.cover_url[len('file://'):]
@@ -597,7 +647,9 @@ class FFmpeg:
         log.debug(
             f'[FFmpeg] Added cover art for {fullfilepath} in temp file, moving it')
         shutil.move(temp_file, fullfilepath)
-        os.remove(cover_file)   # now delete the cover art
+        #os.remove(cover_file)   # now delete the cover art
+        log.info(
+            f'[FFmpeg] Added artwork for {fullfilepath}')
 
     @staticmethod
     def killAll():
@@ -609,6 +661,18 @@ class FFmpeg:
 
         log.info("[FFmpeg] All instances killed")
 
+class PostProcessThread(Thread):
+    def __init__(self, file_path:str):
+        Thread.__init__(self)
+        self.file_path = file_path
+
+    def run(self):
+        # Call your post-processing function here
+        # For example: open_and_shorten_song(self.file_path)
+        print(f"| -- [Post Processsing] --")
+        open_and_shorten_song(self.file_path)
+
+        pass
 
 class Shell:
     @staticmethod
