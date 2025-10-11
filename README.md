@@ -2,36 +2,31 @@
 
 Python script to record the audio of the Spotify desktop client using FFmpeg
 and PulseAudio
+and saving song-data to database.
 
-AUR: https://aur.archlinux.org/packages/spotrec/
 
+
+## Things To Improve
+- [ ] add querying information from Spotify instead of musicbrainz - cus its more up to date usually
+- [ ] add interface to clear out certain entries from db ( either because of wrong download or similar)
+- [ ] improve logging information
+- [ ] maybe add timestamps to db?
 
 
 ## Usage
 
-If you use the AUR package,
-you can simply run:
-
-```
-spotrec
-```
-
-If you have a GNU/Linux distribution with a different package manager system,
-run:
-
 ```
 python3 spotrec.py
 ```
+or when using the start-script ( that makes use of some parameters one can set)
 
+```
+sh start.sh
+```
 
-
-### Example
-
-First of all run spotify. To circumvent incompatibilities occuring on some distros, install it via snap:
-
-```bash
-snap install spotify
-``` 
+---
+### Requirements | Example
+- For making use of this tool you need a spotify client.
 
 Then you can run the python script which will record the music:
 
@@ -78,6 +73,10 @@ Finally start playing whatever you want
 
   * because SpotRec records a little longer at the end to ensure that nothing is missing of the song. But sometimes this also includes the beginning of the next song. So you should use Audacity to cut the audio to what you want. From Audacity you can also export it to the format you like (ogg/mp3/...).
 
+> This has been worked on in this fork. It attempts to query information about length of the song and, if received, cuts it down to that size. Further an offset helps, possibly, avoiding recording the next song.
+> - If for a song no track length could be determined from external source, it is saved with the prefix `_[UNCHECKED]_`
+
+---
 
 ## Troubleshooting
 
@@ -116,3 +115,18 @@ I would suggest you to:
 application for a long time (more or less an hour) and starts looping over a
 song, to avoid this scenario I would suggest to keep interacting with the
 spotify client.**
+
+
+---
+### Ideas for improvement: 
+
+For better tracking of the current state we could introduce a _state\_machine_ denoting the state of a song. 
+
+```
+
+INITIAL --Skip--> Song Records  --Pause Triggered--> Redo Recording
+                           \
+                            Song Change
+                             \
+                              > New Song, Stop Recording
+```
