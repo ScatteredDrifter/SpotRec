@@ -142,21 +142,28 @@ def open_and_shorten_song(audio_path:str):
         new_path:str= os.path.join(target_dir,new_name)
         # print(f"new path: {new_path}")
         print_info("No track length found, saving unchecked")
-        print_info(f"Saving To {new_path}")
+        # print_info(f"Saving To {new_path}")
         shutil.move(src=audio_path,dst=new_path)
         return
     
-    if track_length == song_info.song_length_in_ms:
-        print_info("Track Length already Correct")
-        return
+    # if track_length == song_info.song_length_in_ms:
+        # print_info("Track Length already Correct")
+        # return
     
     # assumes actual track length was found and does not match the given length
     # cuts and overwrites file accordingly
     print_info(f"Found length of {track_length} ms, original length is {song_info.song_length_in_ms}")
-    print_info("Cutting to length")
+    print_info(f"received_metadata:{song_info}")
+    metadata_as_dict:dict[str,str] = {
+        "artist":song_info.artist,
+        "title":song_info.title,
+        "album":song_info.album if song_info.album is not None else "",
+        "source":song_info.source if song_info.source is not None else ""
+    }
+    # print_info("Cutting to length")
     as_segment = AudioSegment.from_file(audio_path)
     cut_down_version = as_segment[:track_length]
-    cut_down_version.export(audio_path, format="flac")
+    cut_down_version.export(audio_path, format="flac",tags=metadata_as_dict)
 
 def print_info(content:str):
     print(f"| - [Info]: {content}")
@@ -167,7 +174,7 @@ def print_warning(content:str):
 
 if __name__ == "__main__":
     print("Testing PostProcessing-Tool")
-    song_unprocessed:str = "/home/evelyn/Nextcloud/tech-cluster/Programming/projects/SpotRec-Fork/spotify/Oaring.flac"
+    song_unprocessed:str = "/home/evelyn/Nextcloud/tech-cluster/Programming/projects/SpotRec-Fork/tstfile.flac"
     unp_as_audio = flac.Open(song_unprocessed)
     print(unp_as_audio.pprint())
     print("------------")
