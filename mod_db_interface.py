@@ -16,14 +16,13 @@ SOURCES:list[str] = [
 ]
 
 def initialize_database(path_to_db:str) -> sqlite3.Connection:
-    init_db = False 
     if not os.path.isfile(path_to_db):
         # creating new db at given location
         print(f"|- [DB Initialization] No Db found, creating new at {path_to_db}")
-    
-    connection = sqlite3.connect(path_to_db)
-    create_tables(connection)
-    
+        connection = sqlite3.connect(path_to_db)
+        create_tables(connection)
+    else:
+        connection = sqlite3.connect(path_to_db)
     return connection
 
         
@@ -80,6 +79,18 @@ def query_artist_name(db:sqlite3.Connection,id:int) -> str|None:
     result = cursor.fetchone()
     return result[0] if result else None
 
+def query_song_id(db:sqlite3.Connection,artist_id:int|None,title:str) -> int|None:
+    cursor = db.cursor()
+    if artist_id:
+        cursor.execute("""SELECT id FROM songs 
+                       WHERE artist_id =? AND title =?;""",
+                       (artist_id,title,))
+    else: 
+        cursor.execute("""SELECT id FROM songs 
+                       WHERE title =?;""",
+                       (title,))
+    result = cursor.fetchone()
+    return result[0] if result else None
 
 def query_source_id(db:sqlite3.Connection, source_name:str) -> int|None:
     cursor = db.cursor()

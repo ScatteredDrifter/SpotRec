@@ -8,7 +8,7 @@
 # |--- external imports 
 import os 
 from pydub import AudioSegment
-from mutagen import flac 
+from mutagen import flac,mp3,wave
 import shutil
 import pprint
 import musicbrainzngs
@@ -80,7 +80,7 @@ def song_track_length_by_artist(song_info:song_metadata) -> int | None:
             return int(rec.get('length', 0))
     return None
 
-def receive_metadata_from_song(audio_ref:flac.FLAC) -> song_metadata|None:
+def receive_metadata_from_flac(audio_ref:flac.FLAC) -> song_metadata|None:
     '''
     requires FLAC-File; obtains song-metadata:
     title,artist,album,track_id and song-length
@@ -110,6 +110,129 @@ def receive_metadata_from_song(audio_ref:flac.FLAC) -> song_metadata|None:
         source=None
     )
 
+def receive_metadata_from_mp3(audio_ref:mp3.MP3) -> song_metadata|None:
+    '''
+    requires MP3-File; obtains song-metadata:
+    title, artist, album, track_id and song-length
+    may return None if no information could be obtained
+    '''
+    # MP3 files use ID3 tags
+    tags = audio_ref.tags
+    if tags is None:
+        print_warning("MP3 file does not contain any tags")
+        return None
+    
+    # Extract metadata from ID3 tags
+    maybe_title = None
+    maybe_artist = None
+    maybe_album = None
+    maybe_track_id = None
+    maybe_song_length = audio_ref.info.length  # Length in seconds
+    
+    # Get title (TIT2)
+    if 'TIT2' in tags:
+        maybe_title = [str(tags['TIT2'])]
+    
+    # Get artist (TPE1)
+    if 'TPE1' in tags:
+        maybe_artist = [str(tags['TPE1'])]
+    
+    # Get album (TALB)
+    if 'TALB' in tags:
+        maybe_album = [str(tags['TALB'])]
+    
+    # Get MusicBrainz track ID (UFID:http://musicbrainz.org)
+    if 'UFID:http://musicbrainz.org' in tags:
+        maybe_track_id = [tags['UFID:http://musicbrainz.org'].data.decode('utf-8')]
+    elif 'TXXX:MusicBrainz Release Track Id' in tags:
+        maybe_track_id = [str(tags['TXXX:MusicBrainz Release Track Id'])]
+    
+    print_info(f"found artist in metadata:: {maybe_artist}")
+    
+    if (maybe_title is None) and (maybe_artist is None): 
+        print_warning("MP3 file does not contain artist or title")
+        return None
+    
+    track_id = None
+    if maybe_track_id is not None:
+        track_id = maybe_track_id[0]
+    
+    return song_metadata(
+        title=maybe_title[0] if maybe_title else "Unknown Title",
+        artist=maybe_artist[0] if maybe_artist else "Unknown Artist",
+        track_id=track_id,
+        song_length_in_ms=maybe_song_length * 1000,  # Convert seconds to milliseconds
+        album=maybe_album[0] if maybe_album else None,
+        source=None
+    )
+
+def receive_metadata_from_wav(audio_ref:wave.WAVE) -> song_metadata|None:
+    '''
+    requires WAV-File; obtains song-metadata:
+    WAV files typically don't contain extensive metadata
+    but we can extract what's available and the length
+    '''
+    # WAV files have limited metadata capabilities
+    # Most WAV files don't have embedded tags like MP3 or FLAC
+    # We'll extract what we can, mainly the length
+    
+    # Try to get basic info from INFO chunk if available
+    info_tags = {}
+    if hasattr(audio_ref, 'tags'):
+        info_tags = audio_ref.tags
+    
+    maybe_title = info_tags.get('INAM', ['Unknown Title'])
+    maybe_artist = info_tags.get('IART', ['Unknown Artist'])
+    maybe_album = info_tags.get('IPRD', ['Unknown Album'])
+    maybe_track_id = None  # WAV files typically don't have MusicBrainz IDs
+    maybe_song_length = audio_ref.info.length  # Length in seconds
+    
+    print_info(f"found artist in metadata:: {maybe_artist}")
+    
+    # WAV files often don't have metadata, so we'll be more lenient
+    # and return what we can extract
+    
+    return song_metadata(
+        title=maybe_title[0] if isinstance(maybe_title, list) else maybe_title,
+        artist=maybe_artist[0] if isinstance(maybe_artist, list) else maybe_artist,
+        track_id=None,
+        song_length_in_ms=maybe_song_length * 1000,  # Convert seconds to milliseconds
+        album=maybe_album[0] if isinstance(maybe_album, list) and maybe_album else None,
+        source=None
+    )
+
+
+
+def get_metadata_from_file(audio_path: str) -> song_metadata | None:
+    """
+    Detects the file type and uses the appropriate function to extract metadata.
+    Supports FLAC, MP3, and WAV files.
+    
+    Args:
+        audio_path: Path to the audio file
+        
+    Returns:
+        song_metadata object or None if metadata couldn't be extracted
+    """
+    file_ext = os.path.splitext(audio_path)[1].lower()
+    
+    try:
+        if file_ext == '.flac':
+            audio_file = flac.Open(audio_path)
+            return receive_metadata_from_flac(audio_file)
+        elif file_ext == '.mp3':
+            audio_file = mp3.MP3(audio_path)
+            return receive_metadata_from_mp3(audio_file)
+        elif file_ext == '.wav':
+            audio_file = wave.WAVE(audio_path)
+            return receive_metadata_from_wav(audio_file)
+        else:
+            print_warning(f"Unsupported file format: {file_ext}")
+            return None
+    except Exception as e:
+        print_warning(f"Error reading metadata from {audio_path}: {str(e)}")
+        return None
+
 def open_and_shorten_song(audio_path:str):
     if not os.path.isfile(audio_path):
         raise Exception(f"no valid file given {audio_path}")
@@ -117,10 +240,8 @@ def open_and_shorten_song(audio_path:str):
         print_warning("found file that has been processed already, skipping")
         return 
     
-    as_audio = flac.Open(audio_path)
-
-    # receive its metadata
-    song_info = receive_metadata_from_song(as_audio)
+    # Get metadata based on file type
+    song_info = get_metadata_from_file(audio_path)
 
     if song_info is None:
         return
@@ -133,7 +254,8 @@ def open_and_shorten_song(audio_path:str):
     else: 
         track_length = song_track_length_by_artist(song_info)
     
-    if track_length is None:
+    if True:
+    #if track_length is None:
         # saving the file again, but with different name -> indicating unchecked state of length etc.
         target_dir = os.path.dirname(audio_path)
         file_name  = os.path.basename(audio_path)
@@ -179,7 +301,7 @@ if __name__ == "__main__":
     print(unp_as_audio.pprint())
     print("------------")
     # print("new values")
-    metadata = receive_metadata_from_song(unp_as_audio)
+    metadata = receive_metadata_from_flac(unp_as_audio)
     # print(track_length)
     # length = song_track_length_by_id(track_id)
     # length = song_track_length_by_artist(track_artist,track_title)
