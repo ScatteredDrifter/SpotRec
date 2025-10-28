@@ -23,7 +23,7 @@ import requests
 import sqlite3
 
 # |---- Internal Imports
-from song_postprocess_after_picard import open_and_shorten_song
+from mod_post_process_picard import open_and_shorten_song
 from mod_db_interface import song_is_in_db,insert_new_song,initialize_database,SOURCES
 from mod_data_representation import song_metadata
 # Deps:
@@ -293,6 +293,7 @@ class Spotify:
             trackNumber=self.metadata_trackNumber,
             title=self.metadata_title.replace("/", "_")
         ))
+        print(f"[filename construction] result with filename: {ret}")
 
         if _underscored_filenames:
             ret = ret.replace(".", "").lower()
@@ -508,51 +509,23 @@ class FFmpeg:
         # save this to self because metadata_params is discarded after this function
         self.cover_url = metadata_for_file.pop('cover_url')
 
-        #FIXME may not be necessary to clone 
-        metadata_copy = metadata_for_file.copy()
-        # Build metadata parameters
         metadata_params = ''
-        for key, value in metadata_copy.items():
-            if value:  # Only add metadata if value is not empty
-                metadata_params += ' -metadata ' + key + '=' + shlex.quote(str(value))
-        
-        # Build the full FFmpeg command with proper spacing
-        command = (_ffmpeg_executable + ' -hide_banner -y '
-                '-f pulse '
-                '-ac 2 -ar 44100 -fragment_size 8820 '
-                '-i ' + self.pulse_input)
-        
-        # Add metadata if we have any
-        if metadata_params:
-            command += ' ' + metadata_params
-        
-        # Add output format and filename
-        command += ' -acodec ' + _audio_codec + ' ' + shlex.quote(os.path.join(self.out_dir, self.filename))
-        
-        # Log the command for debugging
-        log.info(f"[FFmpeg] Full command: {command}")
-        
-        # Execute the command
-        self.process = Shell.Popen(command)
-
-        # build metadata param
-        # metadata_params = ''
-        # for key, value in metadata_for_file.items():
-        #     metadata_params += ' -metadata ' + key + '=' + shlex.quote(value)
-        # # print(f"[DEBUG] [RECORDING] [METADATA] found the following metadata params\n{metadata_params}")
-        # # FFmpeg Options:
-        # #  "-hide_banner": short the debug log a little
-        # #  "-y": overwrite existing files
-        # #  "-ac 2": always use 2 audio channels (stereo) (same as Spotify)
-        # #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
-        # #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
-        # #  "-acodec": use flac or mp3 audio codec, specified as command line argument
-        # self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
-        #                            '-f pulse ' +
-        #                            '-ac 2 -ar 44100 -fragment_size 8820 ' +
-        #                            '-i ' + self.pulse_input + metadata_params + ' '
-        #                            ' -acodec ' + _audio_codec +
-        #                            ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
+        for key, value in metadata_for_file.items():
+            metadata_params += ' -metadata ' + key + '=' + shlex.quote(value)
+        # print(f"[DEBUG] [RECORDING] [METADATA] found the following metadata params\n{metadata_params}")
+        # FFmpeg Options:
+        #  "-hide_banner": short the debug log a little
+        #  "-y": overwrite existing files
+        #  "-ac 2": always use 2 audio channels (stereo) (same as Spotify)
+        #  "-ar 44100": always use 44.1k samplerate (same as Spotify)
+        #  "-fragment_size 8820": set recording latency to 50 ms (0.05*44100*2*2) (very high values can cause ffmpeg to not stop fast enough, so post-processing fails)
+        #  "-acodec": use flac or mp3 audio codec, specified as command line argument
+        self.process = Shell.Popen(_ffmpeg_executable + ' -hide_banner -y '
+                                   '-f pulse ' +
+                                   '-ac 2 -ar 44100 -fragment_size 8820 ' +
+                                   '-i ' + self.pulse_input + metadata_params + ' '
+                                   ' -acodec ' + _audio_codec +
+                                   ' ' + shlex.quote(os.path.join(self.out_dir, self.filename)))
 
         self.pid = str(self.process.pid)
 
