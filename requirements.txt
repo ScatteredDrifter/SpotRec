@@ -11,3 +11,7 @@ mutagen==1.47.0
 packaging==25.0
 PyAudio==0.2.14
 pydub==0.25.1
+pycairo
+PyGoObject
+requests
+
